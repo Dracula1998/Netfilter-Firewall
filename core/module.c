@@ -1,3 +1,5 @@
+#include "constants.h"
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/netfilter.h>
@@ -6,7 +8,6 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/skbuff.h>
-#include "constants.h"
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/timer.h>
@@ -14,22 +15,27 @@
 #include <linux/rtc.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/unistd.h>
+#include <asm/uaccess.h>
+#include <asm/processor.h>
 
 //========================Filter Declaration==START==Author: @wzs82868996==================
-bool check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, int length);
+FILTER_BOOL check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, int length);
 
-bool check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int length);
+FILTER_BOOL check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int length);
 //=========================Filter Declaration==END=========================================
 
 
 
 //========================Logger Declaration==START==Author: @Dracula1998==================
 
+#define LOG_LEVEL LOGGER_OK
+
 void init_writer(void);
 
 /**
  * Be aware that the message has max length. The concat message length should be less than
- * 1024 bytes.
+ * 512 bytes.
  *
  * @param source
  * @param level
@@ -58,18 +64,24 @@ unsigned int hook_funcion(void *priv, struct sk_buff *skb, const struct nf_hook_
 
     if (!skb) return NF_ACCEPT;
 
+    char info[256];
+
     struct iphdr *ip = ip_hdr(skb);
     if (!ip) return NF_ACCEPT;
     unsigned int saddr = ip->saddr;
     unsigned int daddr = ip->daddr;
-    printk(NAME"IP[%u.%u.%u.%u]--->[%u.%u.%u.%u]", saddr & 255u, saddr >> 8u & 255u, saddr >> 16u & 255u,
+
+    sprintf(info, "IP[%u.%u.%u.%u]--->[%u.%u.%u.%u]", saddr & 255u, saddr >> 8u & 255u, saddr >> 16u & 255u,
            saddr >> 24u & 255u, daddr & 255u, daddr >> 8u & 255u, daddr >> 16u & 255u, daddr >> 24u & 255u);
+    log_message("Hook Function IP", LOGGER_OK, info);
 
     if (ip->protocol == IPPROTO_TCP) {
         struct tcphdr *tcp = tcp_hdr(skb);
-        printk(NAME"TCP[%u.%u.%u.%u:%hu]-->[%u.%u.%u.%u:%hu]", saddr & 255u, saddr >> 8u & 255u, saddr >> 16u & 255u,
-               saddr >> 24u & 255u, tcp->source, daddr & 255u, daddr >> 8u & 255u, daddr >> 16u & 255u,
-               daddr >> 24u & 255u, tcp->dest);
+
+        sprintf(info, "TCP[%u.%u.%u.%u:%hu]-->[%u.%u.%u.%u:%hu]", saddr & 255u, saddr >> 8u & 255u,
+                saddr >> 16u & 255u, saddr >> 24u & 255u, tcp->source, daddr & 255u, daddr >> 8u & 255u,
+               daddr >> 16u & 255u, daddr >> 24u & 255u, tcp->dest);
+        log_message("Hook Function TCP", LOGGER_OK, info);
 
         unsigned char *user_data = (unsigned char *) ((unsigned char *) tcp + (tcp->doff * 4));
         unsigned char *tail = skb_tail_pointer(skb);
@@ -85,9 +97,11 @@ unsigned int hook_funcion(void *priv, struct sk_buff *skb, const struct nf_hook_
 
     } else if (ip->protocol == IPPROTO_UDP) {
         struct udphdr *udp = udp_hdr(skb);
-        printk(NAME"UDP[%u.%u.%u.%u:%hu]-->[%u.%u.%u.%u:%hu]", saddr & 255u, saddr >> 8u & 255u, saddr >> 16u & 255u,
-               saddr >> 24u & 255u, udp->source, daddr & 255u, daddr >> 8u & 255u, daddr >> 16u & 255u,
-               daddr >> 24u & 255u, udp->dest);
+
+        sprintf(info, "UDP[%u.%u.%u.%u:%hu]-->[%u.%u.%u.%u:%hu]", saddr & 255u, saddr >> 8u & 255u,
+                saddr >> 16u & 255u, saddr >> 24u & 255u, udp->source, daddr & 255u, daddr >> 8u & 255u,
+               daddr >> 16u & 255u, daddr >> 24u & 255u, udp->dest);
+        log_message("Hook Function UDP", LOGGER_OK, info);
 
         unsigned char *user_data = (unsigned char *) ((unsigned char *) udp + 32);
         if (user_data) {
@@ -118,8 +132,6 @@ static int __init hook_init(void) {
     nfho.priority = NF_IP_PRI_MANGLE;
     for_each_net(n)ret += nf_register_net_hook(n, &nfho);
 
-    printk(NAME"nf_register_hook returnd %d\n", ret);
-
     char message[128];
     sprintf(message, "nf_register_hook returnd %d", ret);
     log_message("Hook init", LOGGER_OK, message);
@@ -130,13 +142,15 @@ static int __init hook_init(void) {
 static void __exit hook_exit(void) {
     struct net *n;
 
+    log_message("Hook exit", LOGGER_OK, "Hook deinit");
+
     for_each_net(n)nf_unregister_net_hook(n, &nfho);
 
     close_writer();
 }
 
-module_init(hook_init);
-module_exit(hook_exit);
+module_init(hook_init)
+module_exit(hook_exit)
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("Tomahawkd");
@@ -145,12 +159,12 @@ MODULE_AUTHOR("Tomahawkd");
 
 
 //========================Filter Implementation==START==Author: @wzs82868996===============
-bool check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, int length) {
-    return true;
+FILTER_BOOL check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, int length) {
+    return FILTER_TRUE;
 }
 
-bool check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int length) {
-    return true;
+FILTER_BOOL check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int length) {
+    return FILTER_TRUE;
 }
 //========================Filter Implementation==END==Author: @wzs82868996=================
 
@@ -159,30 +173,31 @@ bool check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int le
 
 //========================Logger Implementation==START==Author: @Dracula1998===============
 
-struct file *fp;
+struct file *file;
 
 void init_writer(void) {
-    fp = filp_open("/var/log/NetFilter.log", O_RDWR | O_CREAT, 0644);
-    if (IS_ERR(fp)) {
+    file = filp_open("/var/log/NetFilter.log", O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (IS_ERR(file)) {
         printk(NAME"Create log file error\n");
+        file = NULL;
         return;
     }
 }
 
-void write_log(char *log_str) {
-    mm_segment_t fs;
-    loff_t pos;
+void write_log(char *log_str, int length) {
 
-    printk(NAME"Writing log\n");
+    if (log_str == NULL) return;
 
-    fs = get_fs();
-    set_fs(KERNEL_DS);
-    vfs_write(fp, log_str, strlen(log_str) * 8, &pos);
-    set_fs(fs);
+    printk(NAME"%s", log_str);
+
+    mm_segment_t old_fs = get_fs();
+    set_fs(get_ds());
+    vfs_write(file, log_str, length, &file->f_pos);
+    set_fs(old_fs);
 }
 
 void close_writer(void) {
-    filp_close(fp, NULL);
+    filp_close(file, NULL);
 }
 
 void get_current_time(char* time) {
@@ -195,7 +210,7 @@ void get_current_time(char* time) {
     txc.time.tv_sec -= sys_tz.tz_minuteswest * 60;
     rtc_time_to_tm(txc.time.tv_sec, &tm);
     sprintf(time, "%d-%02d-%02d %02d:%02d:%02d",
-            tm.tm_year + 1900, /* this value should be 1970? */
+            tm.tm_year + 1900,
             tm.tm_mon + 1,
             tm.tm_mday,
             tm.tm_hour,
@@ -205,13 +220,14 @@ void get_current_time(char* time) {
 
 void log_message(char *source, int level, char *message) {
 
-    char time[32];
-    char log_str[1024];
-    char *level_str = NULL;
+    if (file == NULL) return;
+    if (message == NULL || source == NULL) return;
 
-    printk(NAME"Source %s\n", source);
-    printk(NAME"Message %s\n", message);
-    printk(NAME"Level %d\n", level);
+    if (level < LOG_LEVEL) return;
+
+    char time[32];
+    char log_str[512];
+    char *level_str = NULL;
 
     switch (level) {
         case LOGGER_DEBUG:
@@ -237,7 +253,7 @@ void log_message(char *source, int level, char *message) {
     get_current_time(time);
 
     sprintf(log_str, "%s [%s] %s %s\n", time, source, level_str, message);
-    write_log(log_str);
+    write_log(log_str, strlen(log_str));
 }
 
 //========================Logger Implementation==END=======================================

@@ -25,10 +25,16 @@ bool check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int le
 
 //========================Logger Declaration==START==Author: @Dracula1998==================
 
-char *log_str = NULL;
-
 void init_writer(void);
 
+/**
+ * Be aware that the message has max length. The concat message length should be less than
+ * 1024 bytes.
+ *
+ * @param source
+ * @param level
+ * @param message
+ */
 void log_message(char *source, int level, char *message);
 
 void close_writer(void);
@@ -104,6 +110,8 @@ static int __init hook_init(void) {
     int ret = 0;
     struct net *n;
 
+    init_writer();
+
     nfho.hook = hook_funcion;
     nfho.pf = NFPROTO_IPV4;
     nfho.hooknum = NF_INET_PRE_ROUTING;
@@ -112,6 +120,10 @@ static int __init hook_init(void) {
 
     printk(NAME"nf_register_hook returnd %d\n", ret);
 
+    char message[128];
+    sprintf(message, "nf_register_hook returnd %d", ret);
+    log_message("Hook init", LOGGER_OK, message);
+
     return 0;
 }
 
@@ -119,6 +131,8 @@ static void __exit hook_exit(void) {
     struct net *n;
 
     for_each_net(n)nf_unregister_net_hook(n, &nfho);
+
+    close_writer();
 }
 
 module_init(hook_init);
@@ -150,7 +164,7 @@ struct file *fp;
 void init_writer(void) {
     fp = filp_open("/var/log/NetFilter.log", O_RDWR | O_CREAT, 0644);
     if (IS_ERR(fp)) {
-        printk("create file error/n");
+        printk(NAME"Create log file error\n");
         return;
     }
 }
@@ -159,7 +173,7 @@ void write_log(char *log_str) {
     mm_segment_t fs;
     loff_t pos;
 
-    printk("hello enter/n");
+    printk(NAME"Writing log\n");
 
     fs = get_fs();
     set_fs(KERNEL_DS);
@@ -171,9 +185,8 @@ void close_writer(void) {
     filp_close(fp, NULL);
 }
 
-char *get_current_time(void) {
+void get_current_time(char* time) {
 
-    char *time;
     struct timex txc;
     struct rtc_time tm;
 
@@ -181,23 +194,24 @@ char *get_current_time(void) {
 
     txc.time.tv_sec -= sys_tz.tz_minuteswest * 60;
     rtc_time_to_tm(txc.time.tv_sec, &tm);
-    sprintf(time, "\n%d-%02d-%02d %02d:%02d:%02d\n",
-            tm.tm_year + 1900,
+    sprintf(time, "%d-%02d-%02d %02d:%02d:%02d",
+            tm.tm_year + 1900, /* this value should be 1970? */
             tm.tm_mon + 1,
             tm.tm_mday,
             tm.tm_hour,
             tm.tm_min,
             tm.tm_sec);
-    return time;
 }
 
 void log_message(char *source, int level, char *message) {
-    char *time = NULL;
+
+    char time[32];
+    char log_str[1024];
     char *level_str = NULL;
 
-    printk("%s\n", source);
-    printk("%s\n", message);
-    printk("%d\n", level);
+    printk(NAME"Source %s\n", source);
+    printk(NAME"Message %s\n", message);
+    printk(NAME"Level %d\n", level);
 
     switch (level) {
         case LOGGER_DEBUG:
@@ -220,9 +234,9 @@ void log_message(char *source, int level, char *message) {
             break;
     }
 
-    time = get_current_time();
+    get_current_time(time);
 
-    sprintf(log_str, "%s [%s][%s] %s\n", time, level_str, source, message);
+    sprintf(log_str, "%s [%s] %s %s\n", time, source, level_str, message);
     write_log(log_str);
 }
 

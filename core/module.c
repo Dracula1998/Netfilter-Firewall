@@ -20,9 +20,41 @@
 #include <asm/processor.h>
 
 //========================Filter Declaration==START==Author: @wzs82868996==================
-FILTER_BOOL check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, int length);
+typedef struct Node {
+    unsigned int sip;
+    unsigned short port;
+    unsigned short protocol;
+    unsigned int mask;
+    bool isPermit;
+    struct Node *next; 
+} Node, *NodePointer;
 
-FILTER_BOOL check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int length);
+static int major_number;
+static NodePointer head, tail;
+static struct cdev netfilter_cdev;
+
+void addRule(struct Node *node);
+
+void deleteRule(struct Node *node);
+
+void clearRule(void);
+
+long cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+
+struct file_operations cdev_fops = {
+    .owner = THIS_MODULE,
+    .unlocked_ioctl = cdev_ioctl
+};
+
+unsigned int times_contains(unsigned char *s, unsigned char *c, unsigned int lens, unsigned int lenc);
+
+bool check_ip(struct iphdr *ip, unsigned short sport);
+
+bool check_sc(unsigned char *data, unsigned int length);
+
+FILTER_BOOL check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, unsigned int length);
+
+FILTER_BOOL check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, unsigned int length);
 //=========================Filter Declaration==END=========================================
 
 
@@ -63,11 +95,204 @@ void close_writer(void);
 
 
 //========================Filter Implementation==START==Author: @wzs82868996===============
-FILTER_BOOL check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, int length) {
+void addRule(struct Node *node) {
+    Node *p;
+    p = (Node *)kmalloc(sizeof(Node), 0);
+    memcpy(p, node, sizeof(struct Node));
+    p->next = NULL;
+    if (head->next == NULL && tail->next == NULL) {
+        head->next = p;
+        tail->next = p;
+    }
+    else {
+        tail->next->next = p;
+        tail->next = p;
+    }
+    log_message("Add Rule", LOGGER_OK, "A new rule added.");
+}
+
+void deleteRule(struct Node *node) {
+    if (head->next != NULL || tail->next != NULL) {
+        Node *p = head;
+        Node *pp = p;
+        while (p && p->next != NULL) {
+            pp = p;
+            p = p->next;
+
+            if(p->sip != node->sip)
+                continue;
+            if(p->port != node->port)
+                continue;
+            if(p->protocol != node->protocol)
+                continue;
+            if(p->mask != node->mask)
+                continue;
+            if(p->isPermit != node->isPermit)
+                continue;
+
+            if(pp->next == head->next) {
+                head->next = NULL;
+                tail->next = NULL;
+            }
+            else if(tail->next == pp->next) {
+                tail->next = pp;
+                pp->next = NULL;
+            }
+            else
+                pp->next = p->next;
+            break;
+        }
+        kfree(p);
+    }
+    log_message("Delete Rule", LOGGER_OK, "Rules deleted.");
+}
+
+void clearRule(void) {
+    Node *p = head;
+    Node *t = NULL;
+    while (p && p->next != NULL) {
+        p = p->next;
+        t = p->next;
+        kfree(p);
+        p = t;
+    }
+    head->next = NULL;
+    tail->next = NULL;
+    log_message("Clear Rule", LOGGER_OK, "Rules cleared.");
+}
+
+long cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+    Node node;
+    copy_from_user(&node,(struct Node *)arg, sizeof(struct Node));
+    switch (cmd) {
+        case 0:
+            addRule(&node);
+            break;
+        case 1:
+            deleteRule(&node);
+            break;
+        case 2:
+            clearRule();
+            break;
+    }
+    return 0;
+}
+
+unsigned int times_contains(unsigned char *s, unsigned char *c, unsigned int lens, unsigned int lenc) {
+    unsigned int i = 0, j = 0, count = 0;
+    while (i < lens && j < lenc){
+        if (s[i] == c[j]) {
+            i++;
+            j++;
+        } else {
+            i -= j - 1;
+            j = 0;
+        }
+        if (j == lenc) {
+            count++;
+            j = 0;
+        }
+    }
+    return count;
+}
+
+bool check_ip(struct iphdr *ip, unsigned short sport) {
+    Node *p = head;
+    unsigned int sip;
+    unsigned short port;
+    unsigned short mask;
+
+    while(p->next != NULL) {
+        p = p->next;
+        if (p->isPermit)
+            continue;
+        sip = p->sip;
+        port = p->port;
+        mask = p->mask;
+
+        if ((ip->saddr & mask) != (sip & mask))
+            continue;
+
+        if (ip->protocol != p->protocol && p->protocol != 0)
+            continue;
+
+        if (sport != port && port != 0)
+           continue;
+
+        char info[256];
+        sprintf(info, "IP[%u.%u.%u.%u] port %u blocked!", ip->saddr & 255u, ip->saddr >> 8u & 255u, ip->saddr >> 16u & 255u, ip->saddr >> 24u & 255u, port);
+        log_message("Check IP", LOGGER_WARN, info);
+        return false;
+    }
+    return true;
+}
+
+bool check_sc(unsigned char *data, unsigned int length) {
+    unsigned char pushl_vsh[] = "\x68\x2f\x2f\x73\x68";
+    unsigned char pushl_sh[] = "\x68\x2f\x73\x68";
+    unsigned char pushl_bin[] = "\x68\x2f\x74\x6d\x70";
+    unsigned char nop[] = "\x90";
+    unsigned char intrpt[] = "\x80";
+    unsigned char intrpt_win10[] = "\xcc";
+    unsigned int nop_threshold = 10;
+    unsigned int int_threshold = 3;
+    bool nop_sled = false, instuct_int = false;
+    if (times_contains(data, nop, length, 1) > nop_threshold)
+        nop_sled = true;
+
+    if (times_contains(data, intrpt, length, 1) > int_threshold)
+        instuct_int = true;
+
+    if (times_contains(data, intrpt_win10, length, 1) > int_threshold)
+        instuct_int = true;
+
+    if (times_contains(data, pushl_vsh, length, 5) != 0) {
+        if (nop_sled)
+            log_message("Check SC", LOGGER_WARN, "NOP sled detected!");
+        if (instuct_int)
+            log_message("Check SC", LOGGER_WARN, "Instruction INT detected!");
+        log_message("Check SC", LOGGER_WARN, "Suspicious \"//sh\" detected. Is there an \"execve\"?");
+        return false;
+    }
+
+    if (times_contains(data, pushl_sh, length, 4) != 0) {
+        if (nop_sled)
+            log_message("Check SC", LOGGER_WARN, "NOP sled detected!");
+        if (instuct_int)
+            log_message("Check SC", LOGGER_WARN, "Instruction INT detected!");
+        log_message("Check SC", LOGGER_WARN, "Suspicious \"/sh\" detected. Is there an \"execve\"?");
+        return false;
+    }
+
+    if (times_contains(data, pushl_bin, length, 5) != 0) {
+        if (nop_sled)
+            log_message("Check SC", LOGGER_WARN, "NOP sled detected!");
+        if (instuct_int)
+            log_message("Check SC", LOGGER_WARN, "Instruction INT detected!");
+        log_message("Check SC", LOGGER_WARN, "Suspicious \"/bin\" detected. Is there an \"execve\"?");
+        return false;
+    }
+
+    return true;
+}
+
+FILTER_BOOL check_tcp(struct iphdr *ip, struct tcphdr *tcp, unsigned char *data, unsigned int length) {
+    if(!check_ip(ip, tcp->source))
+        return FILTER_FALSE;
+
+    if(!check_sc(data, length))
+        return FILTER_FALSE;
+
     return FILTER_TRUE;
 }
 
-FILTER_BOOL check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, int length) {
+FILTER_BOOL check_udp(struct iphdr *ip, struct udphdr *udp, unsigned char *data, unsigned int length) {
+    if(!check_ip(ip, udp->source))
+        return FILTER_FALSE;
+
+    if(!check_sc(data, length))
+        return FILTER_FALSE;
+
     return FILTER_TRUE;
 }
 //========================Filter Implementation==END==Author: @wzs82868996=================
@@ -156,11 +381,16 @@ void get_current_time(char* time) {
 
 void log_message(char *source, int level, char *message) {
 
+    int message_len, source_len;
+    char time[32];
+    char *level_str = NULL;
+    char *log_str;
+    
     if (file == NULL) return;
     if (message == NULL || source == NULL) return;
 
-    int message_len = strnlen(message, 512);
-    int source_len = strnlen(source, 64);
+    message_len = strnlen(message, 512);
+    source_len = strnlen(source, 64);
 
     // length too long
     if (message_len >= 512) {
@@ -173,9 +403,6 @@ void log_message(char *source, int level, char *message) {
     }
 
     if (level < LOG_LEVEL) return;
-
-    char time[32];
-    char *level_str = NULL;
 
     switch (level) {
         case LOGGER_DEBUG:
@@ -203,12 +430,13 @@ void log_message(char *source, int level, char *message) {
 
     get_current_time(time);
 
-    char log_str[32 + 2 + source_len + 2 + strlen(level_str) + 1 + message_len + 2];
+    log_str = kmalloc(32 + 2 + source_len + 2 + strlen(level_str) + 1 + message_len + 2);
 
     sprintf(log_str, "%s [%s] %s %s", time, source, level_str, message);
     print_console(level, log_str);
     strncat(log_str, "\n", 1);
     write_log(log_str, strlen(log_str));
+    kfree(log_str);
 }
 
 //========================Logger Implementation==END=======================================
@@ -219,31 +447,37 @@ static struct nf_hook_ops nfho;
 
 unsigned int hook_funcion(void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
 
+    struct iphdr *ip;
+    struct tcphdr *tcp;
+    struct udphdr *udp;
+    unsigned int saddr, daddr;
+    unsigned char *user_data, *tail;
+    int datasize;
+    char info[256];
+    
     if (!skb) return NF_ACCEPT;
 
-    char info[256];
-
-    struct iphdr *ip = ip_hdr(skb);
+    ip = ip_hdr(skb);
     if (!ip) return NF_ACCEPT;
-    unsigned int saddr = ip->saddr;
-    unsigned int daddr = ip->daddr;
+    saddr = ip->saddr;
+    daddr = ip->daddr;
 
     sprintf(info, "IP[%u.%u.%u.%u]--->[%u.%u.%u.%u]", saddr & 255u, saddr >> 8u & 255u, saddr >> 16u & 255u,
             saddr >> 24u & 255u, daddr & 255u, daddr >> 8u & 255u, daddr >> 16u & 255u, daddr >> 24u & 255u);
     log_message("Hook Function IP", LOGGER_OK, info);
 
     if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = tcp_hdr(skb);
+        tcp = tcp_hdr(skb);
 
         sprintf(info, "TCP[%u.%u.%u.%u:%hu]-->[%u.%u.%u.%u:%hu]", saddr & 255u, saddr >> 8u & 255u,
                 saddr >> 16u & 255u, saddr >> 24u & 255u, tcp->source, daddr & 255u, daddr >> 8u & 255u,
                 daddr >> 16u & 255u, daddr >> 24u & 255u, tcp->dest);
         log_message("Hook Function TCP", LOGGER_OK, info);
 
-        unsigned char *user_data = (unsigned char *) ((unsigned char *) tcp + (tcp->doff * 4));
-        unsigned char *tail = skb_tail_pointer(skb);
+        user_data = (unsigned char *) ((unsigned char *) tcp + (tcp->doff * 4));
+        tail = skb_tail_pointer(skb);
         if (user_data && tail) {
-            int datasize = (int) ((long) tail - (long) user_data);
+            datasize = (int) ((long) tail - (long) user_data);
 
             if (datasize > 0 && check_tcp(ip, tcp, user_data, datasize)) {
                 return NF_ACCEPT;
@@ -253,14 +487,14 @@ unsigned int hook_funcion(void *priv, struct sk_buff *skb, const struct nf_hook_
         }
 
     } else if (ip->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = udp_hdr(skb);
+        udp = udp_hdr(skb);
 
         sprintf(info, "UDP[%u.%u.%u.%u:%hu]-->[%u.%u.%u.%u:%hu]", saddr & 255u, saddr >> 8u & 255u,
                 saddr >> 16u & 255u, saddr >> 24u & 255u, udp->source, daddr & 255u, daddr >> 8u & 255u,
                 daddr >> 16u & 255u, daddr >> 24u & 255u, udp->dest);
         log_message("Hook Function UDP", LOGGER_OK, info);
 
-        unsigned char *user_data = (unsigned char *) ((unsigned char *) udp + 32);
+        user_data = (unsigned char *) ((unsigned char *) udp + 32);
         if (user_data) {
             int datasize = udp->len;
 
@@ -280,6 +514,8 @@ unsigned int hook_funcion(void *priv, struct sk_buff *skb, const struct nf_hook_
 static int __init hook_init(void) {
     int ret = 0;
     struct net *n;
+    char message[128];
+    dev_t devno,devno_m;
 
     init_writer();
 
@@ -289,11 +525,23 @@ static int __init hook_init(void) {
     nfho.priority = NF_IP_PRI_MANGLE;
     for_each_net(n)ret += nf_register_net_hook(n, &nfho);
 
-    char message[128];
     sprintf(message, "nf_register_hook returnd %d", ret);
     log_message("Hook init", LOGGER_OK, message);
 
-    return 0;
+    ret = alloc_chrdev_region(&devno, 0, 1, "NetfilterFirewall");
+    if (ret < 0)
+        return ret;
+
+    major_number = MAJOR(devno);
+    devno_m = MKDEV(major_number, 0);
+    cdev_init(&netfilter_cdev, &cdev_fops);
+    cdev_add(&netfilter_cdev, devno_m, 1);
+    
+    head = (Node *)kmalloc(sizeof(Node), 0);
+    head->next = NULL;
+    tail = head;
+
+    return ret;
 }
 
 static void __exit hook_exit(void) {
@@ -301,9 +549,13 @@ static void __exit hook_exit(void) {
 
     log_message("Hook exit", LOGGER_OK, "Hook deinit");
 
+    clearRule();
     for_each_net(n)nf_unregister_net_hook(n, &nfho);
 
     close_writer();
+
+    cdev_del(&netfilter_cdev);
+    unregister_chrdev_region(MKDEV(major_number, 0), 1);
 }
 
 module_init(hook_init)

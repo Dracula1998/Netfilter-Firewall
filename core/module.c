@@ -430,7 +430,7 @@ void log_message(char *source, int level, char *message) {
 
     get_current_time(time);
 
-    log_str = kmalloc(32 + 2 + source_len + 2 + strlen(level_str) + 1 + message_len + 2);
+    log_str = kmalloc(32 + 2 + source_len + 2 + strlen(level_str) + 1 + message_len + 2, GPF_KERNEL);
 
     sprintf(log_str, "%s [%s] %s %s", time, source, level_str, message);
     print_console(level, log_str);
